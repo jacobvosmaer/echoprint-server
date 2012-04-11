@@ -140,6 +140,44 @@ def cut_code_string_length(code_string):
             parts.append(t)
     return " ".join(parts)
 
+def actual_scores_for_query(qfp_response, elbow=10, local=False):
+    # Get the actual score for all responses
+    original_scores = {}
+    actual_scores = {}
+
+    trackids = [r["track_id"].encode("utf8") for r in qfp_response.results]
+    if local:
+        tcodes = [_fake_solr["store"][t] for t in trackids]
+    else:
+        tcodes = get_tyrant().multi_get(trackids)
+
+    # For each result compute the "actual score" (based on the histogram matching)
+    for (i, r) in enumerate(qfp_response.results):
+        track_id = r["track_id"]
+        original_scores[track_id] = int(r["score"])
+        track_code = tcodes[i]
+        if track_code is None:
+            # Solr gave us back a track id but that track
+            # is not in our keystore
+            continue
+        actual_scores[track_id] = actual_matches(code_string, track_code, elbow = elbow)
+
+    #logger.debug("Actual score for %s is %d (code_len %d), original was %d" % (r["track_id"], actual_scores[r["track_id"]], code_len, top_match_score))
+    # Sort the actual scores
+    sorted_actual_scores = sorted(actual_scores.iteritems(), key=lambda (k,v): (v,k), reverse=True)
+
+    # Because we split songs up into multiple parts, sometimes the results will have the same track in the
+    # first few results. Remove these duplicates so that the falloff is (potentially) higher.
+    new_sorted_actual_scores = []
+    existing_trids = []
+    for trid, result in sorted_actual_scores:
+        trid_split = trid.split("-")[0]
+        if trid_split not in existing_trids:
+            new_sorted_actual_scores.append((trid, result))
+            existing_trids.append(trid_split)
+
+    return new_sorted_actual_scores, original_scores
+
 def best_match_for_query(code_string, elbow=10, local=False):
     # DEC strings come in as unicode so we have to force them to ASCII
     code_string = code_string.encode("utf8")
@@ -182,42 +220,7 @@ def best_match_for_query(code_string, elbow=10, local=False):
         return Response(Response.MULTIPLE_BAD_HISTOGRAM_MATCH, qtime = response.header["QTime"], tic=tic)
 
     # Not a strong match, so we look up the codes in the keystore and compute actual matches...
-
-    # Get the actual score for all responses
-    original_scores = {}
-    actual_scores = {}
-    
-    trackids = [r["track_id"].encode("utf8") for r in response.results]
-    if local:
-        tcodes = [_fake_solr["store"][t] for t in trackids]
-    else:
-        tcodes = get_tyrant().multi_get(trackids)
-    
-    # For each result compute the "actual score" (based on the histogram matching)
-    for (i, r) in enumerate(response.results):
-        track_id = r["track_id"]
-        original_scores[track_id] = int(r["score"])
-        track_code = tcodes[i]
-        if track_code is None:
-            # Solr gave us back a track id but that track
-            # is not in our keystore
-            continue
-        actual_scores[track_id] = actual_matches(code_string, track_code, elbow = elbow)
-    
-    #logger.debug("Actual score for %s is %d (code_len %d), original was %d" % (r["track_id"], actual_scores[r["track_id"]], code_len, top_match_score))
-    # Sort the actual scores
-    sorted_actual_scores = sorted(actual_scores.iteritems(), key=lambda (k,v): (v,k), reverse=True)
-    
-    # Because we split songs up into multiple parts, sometimes the results will have the same track in the
-    # first few results. Remove these duplicates so that the falloff is (potentially) higher.
-    new_sorted_actual_scores = []
-    existing_trids = []
-    for trid, result in sorted_actual_scores:
-        trid_split = trid.split("-")[0]
-        if trid_split not in existing_trids:
-            new_sorted_actual_scores.append((trid, result))
-            existing_trids.append(trid_split)
-    sorted_actual_scores = new_sorted_actual_scores
+    sorted_actual_scores, original_scores = actual_scores_for_query(response, elbow=elbow, local=local)
 
     # We might have reduced the length of the list to 1
     if len(sorted_actual_scores) == 1:
